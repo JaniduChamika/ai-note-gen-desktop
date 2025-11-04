@@ -11,7 +11,7 @@ from collections import deque
 # --- NEW IMPORTS ---
 import tkinter as tk
 from tkinter import scrolledtext
-
+from tkinter import filedialog
 # ---------------------
 
 # Configuration
@@ -202,49 +202,53 @@ def transcription_worker():
 
     # 1. Load model inside the thread to avoid freezing the GUI
     if pipe is None:
-        gui_queue.put("Status: Loading Model... (this may take a moment)\n")
+        # Send a "status" message
+        gui_queue.put(("status", "Loading Model... (this may take a moment)"))
         pipe = load_models()
         if pipe:
-            gui_queue.put("Status: Model Loaded. Click 'Start' to begin.\n")
+            # Send a "status" message
+            gui_queue.put(("status", "Model Loaded. Click 'Start' to begin."))
         else:
-            gui_queue.put("Error: Model failed to load. Please restart.\n")
+            # Send a "status" message
+            gui_queue.put(("status", "Error: Model failed to load. Please restart."))
             return
 
     while not stop_event.is_set():
         try:
             audio = transcription_queue.get(timeout=1)
             if audio is not None and len(audio) > 0:
-                gui_queue.put("Status: Transcribing...\n")
+                # Send a "status" message
+                gui_queue.put(("status", "Transcribing..."))
                 text = transcribe_audio(audio)
-                # --- NEW FILTERING LOGIC ---
+
                 is_repetitive = False
-                if text and len(text) > 10:  # Only check if text is long enough
-                    # Checks if more than 80% of the string is the same character
-                    # e.g., "ත්త్త్త్త్త్త్ත්" or ".........."
+                if text and len(text) > 10:
                     first_char = text[0]
                     if text.count(first_char) / len(text) > 0.8:
                         is_repetitive = True
                         print(f"Filtered repetitive output: {text}")
-                # --- END OF FILTER ---
 
-                if text and not is_repetitive:  # <-- CHECK THE NEW FLAG
-                    timestamp = time.strftime("%H:%M:%S")
-                    formatted_text = f"[{timestamp}] 🎤 {text}\n\n"
+                if text and not is_repetitive:
 
-                    gui_queue.put(formatted_text)
+                    # --- THIS IS THE KEY CHANGE ---
+                    # Instead of a formatted line, send just the text + a space
+                    formatted_text = f"{text} "
+                    # Send a "text" message
+                    gui_queue.put(("text", formatted_text))
+                    # ------------------------------
 
-
-                    # Optional: Save to file (we can keep this)
+                    # Optional: Save to file (no change here)
                     try:
+                        timestamp = time.strftime("%H:%M:%S")  # Timestamp only for file
                         with open('sinhala_transcript.txt', 'a', encoding='utf-8') as f:
                             f.write(f"[{timestamp}] {text}\n")
                     except Exception as e:
                         print(f"Error saving transcript: {e}")
+
         except queue.Empty:
             continue
         except Exception as e:
             print(f"Worker error: {e}")
-
 
 # -------------------------------------------------
 
@@ -276,6 +280,12 @@ class TranscriptionApp:
         self.stop_button = tk.Button(root, text="Stop", command=self.stop_transcription, font=("Arial", 12),
                                      bg="#F44336", fg="white", width=15, state=tk.DISABLED)
         self.stop_button.pack(pady=5)
+
+        # --- NEW: Save Button ---
+        self.save_button = tk.Button(root, text="Save Transcript", command=self.save_transcript, font=("Arial", 12),
+                                     bg="#008CBA", fg="white", width=15, state=tk.DISABLED)
+        self.save_button.pack(pady=(0, 10))  # Add a little space below
+
         # --- NEW: Status Label ---
         self.status_label = tk.Label(root, text="Loading model... please wait.", font=("Arial", 10, "italic"),
                                      fg="gray")
@@ -296,8 +306,22 @@ class TranscriptionApp:
         """Check the queue for new text and update the GUI."""
         try:
             message = gui_queue.get_nowait()
-            self.text_area.insert(tk.END, message)
-            self.text_area.see(tk.END)  # Auto-scroll
+
+            # Check if the message is our new tuple format
+            if isinstance(message, tuple) and len(message) == 2:
+                msg_type, content = message
+
+                if msg_type == "status":
+                    # Update the status label
+                    self.status_label.config(text=content, fg="blue")
+                elif msg_type == "text":
+                    # Append text to the text area
+                    self.text_area.insert(tk.END, content)
+                    self.text_area.see(tk.END)  # Auto-scroll
+
+                    # Once we get text, set status back to "Listening"
+                    self.status_label.config(text="Listening...", fg="green")
+
         except queue.Empty:
             pass
         # Check again after 100ms
@@ -313,25 +337,27 @@ class TranscriptionApp:
         if self.is_running:
             return
 
-        # Check if model is loaded
         if pipe is None:
-            self.text_area.insert(tk.END, "Status: Model is still loading, please wait...\n")
-            self.start_worker_thread()  # Try again just in case
+            self.status_label.config(text="Model is still loading, please wait...", fg="orange")
+            self.start_worker_thread()
             return
 
         print("Starting audio stream...")
         self.is_running = True
 
-        # Reset state variables
+        # --- NEW: Clear the text area on start ---
+        self.text_area.delete(1.0, tk.END)
+        # ----------------------------------------
+
         global audio_buffer, silence_counter, is_speaking
         audio_buffer = []
         silence_counter = 0
         is_speaking = False
 
-        self.text_area.insert(tk.END, "\n--- STARTING ---\nSpeak in Sinhala...\n\n")
+        # Update status label
+        self.status_label.config(text="Listening... Speak in Sinhala.", fg="green")
 
         try:
-            # Start the audio stream
             self.stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 channels=1,
@@ -341,12 +367,13 @@ class TranscriptionApp:
             )
             self.stream.start()
 
-            # Update GUI
             self.start_button.config(state=tk.DISABLED)
             self.stop_button.config(state=tk.NORMAL)
+            self.save_button.config(state=tk.DISABLED)
 
         except Exception as e:
-            self.text_area.insert(tk.END, f"\nError starting audio stream: {e}\n")
+            # Update status label with error
+            self.status_label.config(text=f"Error starting audio stream: {e}", fg="red")
             self.is_running = False
 
     def stop_transcription(self):
@@ -354,21 +381,22 @@ class TranscriptionApp:
             return
 
         print("Stopping audio stream...")
-        stop_event.set()  # Signal worker to stop, though it will auto-stop on queue empty
+        stop_event.set()
 
         if self.stream:
             self.stream.stop()
             self.stream.close()
             self.stream = None
 
-        stop_event.clear()  # Clear event for next start
+        stop_event.clear()
         self.is_running = False
 
-        # Update GUI
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
-        self.text_area.insert(tk.END, "\n--- STOPPED ---\n")
+        self.save_button.config(state=tk.NORMAL)
 
+        # Update status label
+        self.status_label.config(text="Stopped. Click 'Start' to begin.", fg="gray")
     def on_closing(self):
         """Handle window close event."""
         if self.is_running:
@@ -377,6 +405,48 @@ class TranscriptionApp:
         if self.worker_thread:
             self.worker_thread.join(timeout=1)  # Wait for worker
         self.root.destroy()
+
+    def save_transcript(self):
+        """Opens a 'Save As' dialog to save the transcript."""
+        print("Opening save dialog...")
+
+        # Get the full text from the text area
+        # 1.0 means "line 1, character 0"
+        # tk.END means "to the very end"
+        # -1c removes the automatic newline tkinter adds at the end
+        transcript_text = self.text_area.get("1.0", tk.END + "-1c")
+
+        if not transcript_text:
+            self.status_label.config(text="Nothing to save.", fg="orange")
+            return
+
+        try:
+            # Open the 'Save As' dialog
+            file_path = filedialog.asksaveasfilename(
+                initialfile="sinhala_transcript.txt",
+                defaultextension=".txt",
+                filetypes=[
+                    ("Text Files", "*.txt"),
+                    ("All Files", "*.*")
+                ]
+            )
+
+            # If the user cancels, file_path will be empty
+            if not file_path:
+                print("Save cancelled by user.")
+                self.status_label.config(text="Save cancelled.", fg="gray")
+                return
+
+            # Write the text to the chosen file
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(transcript_text)
+
+            print(f"Transcript saved to: {file_path}")
+            self.status_label.config(text=f"Transcript saved to {file_path}", fg="green")
+
+        except Exception as e:
+            print(f"Error saving file: {e}")
+            self.status_label.config(text=f"Error saving file: {e}", fg="red")
 
 
 if __name__ == "__main__":
